@@ -1,0 +1,147 @@
+1. Introduction
+
+This document outlines the high-level technical design for the AI-Powered KB Workflow system. It describes the system architecture, core components, technology stack, data models, and API strategy.
+
+2. System Architecture
+
+The system is designed as a multi-agent microservices-oriented architecture, with a central API gateway managing communication. Key components include:
+External Systems: Support Ticket System, User Interfaces (e.g., internal support portal).
+API Layer (FastAPI): Exposes all system functionalities via RESTful APIs.
+AI Agents (Python Services):
+KB Creator Agent: Generates draft KBs.
+KB Retriever Agent: Performs RAG-based semantic search.
+KB Improviser Agent: Suggests updates to existing KBs.
+Supervisor Interface (Gradio): UI for human review and approval.
+Data Stores:
+Vector Database: For storing KB embeddings for semantic search.
+Relational/NoSQL Database (Metadata DB): For storing KB drafts, published KB metadata, suggestions, user feedback, and operational data.
+AI Services: External or self-hosted LLMs and Embedding Models.
+
+3. Technology Stack
+Backend & AI Logic: Python 3.9+
+API Framework: FastAPI
+UI (Supervisor Interface): Gradio
+LLM Integration:
+Primary: OpenAI API (GPT-3.5-turbo/GPT-4) or Anthropic Claude API.
+Alternative/Future: Self-hosted models via Hugging Face Transformers, Ollama, vLLM.
+Embedding Model:
+Primary: OpenAI text-embedding-ada-002 (or newer) or Sentence Transformers (e.g., all-MiniLM-L6-v2).
+Vector Database: ChromaDB (for ease of startup), Pinecone, Weaviate, or FAISS with a wrapper.
+Metadata Database: PostgreSQL or SQLite (for initial development).
+Orchestration/LLM Frameworks: Langchain or LlamaIndex.
+Task Queue (Optional, for scalability): Celery with Redis or RabbitMQ.
+Containerization: Docker.
+
+4. Data Model / Schema (High-Level)
+Tickets (Input, from external system - conceptual):
+ticket_id (String, PK)
+title (String)
+description (Text)
+conversation_log (JSON/Text)
+resolution_details (Text)
+tags (Array of Strings)
+resolved_at (Timestamp)
+KBDrafts (in Metadata DB):
+draft_id (UUID, PK)
+source_ticket_id (String, FK to external ticket system)
+generated_title (String)
+generated_content (Markdown/Text)
+suggested_tags (Array of Strings)
+status (Enum: pending_review, rejected)
+created_at (Timestamp)
+reviewer_feedback (Text, if rejected)
+PublishedKBs (Metadata in Metadata DB, Embeddings in Vector DB):
+kb_id (UUID, PK)
+title (String)
+content (Markdown/Text) - Full content might be in VectorDB or here.
+tags (Array of Strings)
+version (Integer)
+created_at (Timestamp)
+last_updated_at (Timestamp)
+created_by_agent (Boolean)
+original_draft_id (UUID, FK to KBDrafts, if applicable)
+(Vector DB will store kb_id, chunk_id, text_chunk, embedding_vector, metadata)
+KBImprovementSuggestions (in Metadata DB):
+suggestion_id (UUID, PK)
+kb_id (UUID, FK to PublishedKBs)
+source_info (Text: e.g., "User feedback", "Ticket ID XYZ")
+suggested_changes (Text/JSON Diff)
+reasoning (Text, from AI)
+status (Enum: pending_review, approved, rejected)
+created_at (Timestamp)
+reviewer_feedback (Text, if rejected)
+
+5. API Design (High-Level Endpoints - FastAPI)
+KB Creator:
+POST /api/v1/kb/drafts/from_ticket: Accepts ticket data, triggers draft creation. Returns draft_id.
+KB Retriever:
+GET /api/v1/kb/search: Accepts query (natural language), top_k. Returns ranked list of KBs.
+KB Improviser:
+POST /api/v1/kb/{kb_id}/suggestions: Accepts source info, triggers improvement suggestion. Returns suggestion_id.
+POST /api/v1/kb/{kb_id}/flag: Allows users to flag an article, potentially triggering improver.
+Supervisor Actions (Internal, called by Gradio backend):
+GET /api/v1/kb/drafts: Lists drafts pending review.
+GET /api/v1/kb/drafts/{draft_id}: Gets a specific draft.
+PUT /api/v1/kb/drafts/{draft_id}/approve: Approves a draft, publishes it. Accepts final content/tags.
+PUT /api/v1/kb/drafts/{draft_id}/reject: Rejects a draft. Accepts feedback.
+GET /api/v1/kb/suggestions: Lists suggestions pending review.
+GET /api/v1/kb/suggestions/{suggestion_id}: Gets a specific suggestion.
+PUT /api/v1/kb/suggestions/{suggestion_id}/approve: Approves a suggestion, updates the KB.
+PUT /api/v1/kb/suggestions/{suggestion_id}/reject: Rejects a suggestion. Accepts feedback.
+General KB Management:
+GET /api/v1/kb/{kb_id}: Retrieves a published KB.
+PUT /api/v1/kb/{kb_id}: Manually updates a published KB.
+
+6. Component Breakdown
+KB Creator Agent:
+Input: Resolved ticket data (JSON).
+Process:
+Pre-process/clean ticket data.
+Construct prompt for LLM (e.g., "Summarize this ticket into a KB article with sections: Problem, Environment, Steps, Cause, Solution...").
+Call LLM service.
+Parse LLM response.
+Store draft in KBDrafts table.
+Output: draft_id.
+KB Retriever Agent (RAG):
+Input: Natural language query string.
+Process:
+Generate embedding for the query using Embedding Model.
+Perform semantic search in Vector DB against KB embeddings.
+Retrieve top-N relevant KB chunks/articles.
+(Optional RAG Step) Construct prompt for LLM with query and retrieved context: "Using the following KB articles, answer this question: [query]".
+Call LLM service for synthesized answer or use retrieved chunks directly.
+Output: List of relevant KBs or synthesized answer.
+KB Improviser Agent:
+Input: kb_id of existing article, new information (e.g., feedback text, summary of a newly resolved similar ticket).
+Process:
+Fetch content of kb_id.
+Construct prompt for LLM (e.g., "Given this KB article: [text] and this new information: [text], suggest specific improvements. Highlight outdated parts or missing details.").
+Call LLM service.
+Parse LLM response for actionable suggestions.
+Store suggestions in KBImprovementSuggestions table.
+Output: suggestion_id.
+AI Supervisor Agent (Gradio UI + Backend Logic):
+Fetches drafts/suggestions from Metadata DB via API.
+Presents them in an editable format.
+Sends approval/rejection actions back to API, which updates DBs and potentially triggers embedding/indexing.
+
+
+7. Deployment Considerations
+Each agent, the API, and the Gradio app can be containerized using Docker.
+Deployment can be on a cloud platform (AWS, GCP, Azure) or on-premise servers with GPU capabilities (if self-hosting LLMs).
+A reverse proxy (e.g., Nginx) can be used in front of the FastAPI application.
+
+8. Scalability, Reliability, and Security
+Scalability:
+Stateless API and agents can be scaled horizontally.
+Vector DB and Metadata DB choice will impact data layer scalability.
+Async task queues (Celery) for long-running AI operations.
+Reliability:
+Implement robust error handling and retries for API calls to LLMs.
+Database backups and replication.
+Monitoring and logging for all components.
+Security:
+API authentication/authorization (e.g., OAuth2, API keys).
+Secure handling of sensitive ticket data (PII redaction if necessary before sending to LLM).
+Input validation to prevent injection attacks.
+Regular security updates for all dependencies.
