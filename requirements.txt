@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+openai
+gradio
+requests
+sentence-transformers
+scikit-learn # For cosine_similarity
